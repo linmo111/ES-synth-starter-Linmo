@@ -1,7 +1,7 @@
 #include <Arduino.h>
 #include <U8g2lib.h>
 #include <bitset>
-
+#include <STM32FreeRTOS.h>
 //Constants
   const uint32_t interval = 100; //Display update interval
 
@@ -32,19 +32,28 @@
   const int DRST_BIT = 4;
   const int HKOW_BIT = 5;
   const int HKOE_BIT = 6;
+  struct {
+std::bitset<32> inputs;  
+} sysState;
+
+
 
 //Display driver object
 U8G2_SSD1305_128X32_NONAME_F_HW_I2C u8g2(U8G2_R0);
-const uint32_t AStepSize= (2^32)*440/22000;
+// const uint32_t AStepSize= (2^32)*440/22000; 85899345
+const uint32_t AStepSize= 85899345;
 volatile uint32_t currentStepSize;
+// float factor= 2^(1/12);
 
-uint32_t stepSizes [12] = {          };
-void generateStepSize(){
-  for (int i=0;i<11;i++){
-  uint32_t factor= 2^-12;
-  stepSizes[i]=AStepSize*(factor^-9)*(factor^i);
-  }
-}
+// uint32_t stepSizes [12] = {          };
+const uint32_t stepSizes [12] = {     51076056,54113196,57330934,60740009,64351798,68178355,72232451,76527616,81078185,AStepSize,91007185,96418754     };
+// void generateStepSize(){
+  
+//   for (int i=0;i<12;i++){
+  
+//   stepSizes[i]=AStepSize*(factor^-9)*(factor^i);
+//   }
+// }
 void sampleISR() {
   static uint32_t phaseAcc = 0;
   phaseAcc += currentStepSize;
@@ -96,11 +105,66 @@ void setRow(uint8_t rowIdx){
 
   
 }
+void DisplayTask(void * pvParameters){
+  const TickType_t xFrequency = 100/portTICK_PERIOD_MS;
+  TickType_t xLastWakeTime = xTaskGetTickCount();
+  while (1){
+     vTaskDelayUntil( &xLastWakeTime, xFrequency );
+     u8g2.clearBuffer();         // clear the internal memory
+     u8g2.setFont(u8g2_font_ncenB08_tr); // choose a suitable font
+  // u8g2.drawStr(2,10,"Helllo World!");// write something to the internal memory
+  // std::bitset<4> inputs = readCols();
+     u8g2.setCursor(2,10);
+     u8g2.print(sysState.inputs.to_ulong(),BIN); 
+  // u8g2.setCursor(2,10);
+  // u8g2.print(keypressed); 
+  // u8g2.setCursor(2,30);
+  // u8g2.print(localStep); 
+  
+  
+  // u8g2.print(count++);
+  u8g2.sendBuffer();          // transfer internal memory to the display
+
+  // //Toggle LED
+  digitalToggle(LED_BUILTIN);
+
+  }
+}
 
 
 
+void scanKeysTask(void * pvParameters) {
+  const TickType_t xFrequency = 50/portTICK_PERIOD_MS;
+  TickType_t xLastWakeTime = xTaskGetTickCount();
+  while (1){
+    vTaskDelayUntil( &xLastWakeTime, xFrequency );
+    uint32_t keypressed=-1;
+    // std::bitset<12> inputs;
+    uint32_t localStep;
+    for (int i=0; i<3;i++){
+      setRow(i);
+      delayMicroseconds(3);
+      std::bitset<4> result=readCols();
+    
+    // inputs |= (std::bitset<4>(result.to_ulong()) << 12-4*(i+1)); 
+      for (int j=0; j<4; j++){
+        sysState.inputs[11-(i*4+j)]=result[j];
+        if (result[j]==0){
+          keypressed=i*4+j;
+        }
+      }
+    
+   } 
+    if( keypressed==-1){
+      localStep=0;
+    }
+    else{
+    localStep=stepSizes[keypressed];
+    }
+  __atomic_store_n(&currentStepSize, localStep, __ATOMIC_RELAXED);
+  }
 
-
+}
 
 
 
@@ -108,7 +172,7 @@ void setup() {
   // put your setup code here, to run once:
 
   //Set pin directions
-  generateStepSize();
+  // generateStepSize();
   pinMode(RA0_PIN, OUTPUT);
   pinMode(RA1_PIN, OUTPUT);
   pinMode(RA2_PIN, OUTPUT);
@@ -137,54 +201,86 @@ void setup() {
   u8g2.begin();
   setOutMuxBit(DEN_BIT, HIGH);  //Enable display power supply
 
+  TaskHandle_t scanKeysHandle = NULL;
+  xTaskCreate(
+    scanKeysTask,		/* Function that implements the task */
+    "scanKeys",		/* Text name for the task */
+    64,      		/* Stack size in words, not bytes */
+    NULL,			/* Parameter passed into the task */
+    2,			/* Task priority */
+    &scanKeysHandle );	/* Pointer to store the task handle */
+  TaskHandle_t DisplayHandle = NULL;
+  xTaskCreate(
+    DisplayTask,		/* Function that implements the task */
+    "Display",		/* Text name for the task */
+    256,      		/* Stack size in words, not bytes */
+    NULL,			/* Parameter passed into the task */
+    1,			/* Task priority */
+    &DisplayHandle );	/* Pointer to store the task handle */
   //Initialise UART
   Serial.begin(9600);
   Serial.println("Hello World");
-
+  vTaskStartScheduler();
 }
 
 void loop() {
   // put your main code here, to run repeatedly:
-  static uint32_t next = millis();
-  static uint32_t count = 0;
+  // static uint32_t next = millis();
+  // static uint32_t count = 0;
 
-  while (millis() < next);  //Wait for next interval
+  // while (millis() < next);  //Wait for next interval
+  // scanKeysTask(NULL);
   
   // u8g2.setCursor(2,20);
-  uint32_t keypressed;
-  std::bitset<12> inputs;
-  for (int i=0; i<3;i++){
-    setRow(i);
-    delayMicroseconds(3);
-    std::bitset<4> result=readCols();
+  // uint32_t keypressed=-1;
+  // std::bitset<12> inputs;
+  // uint32_t localStep;
+  // for (int i=0; i<3;i++){
+  //   setRow(i);
+  //   delayMicroseconds(3);
+  //   std::bitset<4> result=readCols();
     
-    // inputs |= (std::bitset<4>(result.to_ulong()) << 12-4*(i+1)); 
-    for (int j=0; j<4; j++){
-      inputs[11-(i*4+j)]=result[j];
-      if (result[j]==0){
-        keypressed=i*4+j;
-      }
-    }
+  //   // inputs |= (std::bitset<4>(result.to_ulong()) << 12-4*(i+1)); 
+  //   for (int j=0; j<4; j++){
+  //     inputs[11-(i*4+j)]=result[j];
+  //     if (result[j]==0){
+  //       keypressed=i*4+j;
+  //     }
+  //   }
     
-  }
-  currentStepSize=stepSizes[keypressed];
+  // }
+  // if( keypressed==-1){
+  //   localStep=0;
+  // }
+  // else{
+  // localStep=stepSizes[keypressed];
+  // currentStepSize=demostepSizes[keypressed];
+  // currentStepSize=keypressed;
+  // }
+
   // analogWrite(OUTR_PIN,  208);
   
 
-  next += interval;
+  // next += interval;
 
-  //Update display
-  u8g2.clearBuffer();         // clear the internal memory
-  u8g2.setFont(u8g2_font_ncenB08_tr); // choose a suitable font
-  u8g2.drawStr(2,10,"Helllo World!");// write something to the internal memory
+  // //Update display
+  // u8g2.clearBuffer();         // clear the internal memory
+  // u8g2.setFont(u8g2_font_ncenB08_tr); // choose a suitable font
+  // u8g2.drawStr(2,10,"Helllo World!");// write something to the internal memory
   // std::bitset<4> inputs = readCols();
-  u8g2.setCursor(2,30);
-  u8g2.print(inputs.to_ulong(),BIN); 
+  // u8g2.setCursor(2,10);
+  // u8g2.print(inputs.to_ulong(),BIN); 
+  // u8g2.setCursor(2,10);
+  // u8g2.print(keypressed); 
+  // u8g2.setCursor(2,30);
+  // u8g2.print(localStep); 
+  
   
   // u8g2.print(count++);
-  u8g2.sendBuffer();          // transfer internal memory to the display
+  // u8g2.sendBuffer();          // transfer internal memory to the display
 
-  //Toggle LED
-  digitalToggle(LED_BUILTIN);
-  
+  // //Toggle LED
+  // digitalToggle(LED_BUILTIN);
+  // __atomic_store_n(&currentStepSize, localStep, __ATOMIC_RELAXED);
+  // currentStepSize=localStep;
 }
